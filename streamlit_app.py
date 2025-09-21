@@ -363,6 +363,49 @@ with right:
         fig_g.update_layout(height=420)
         st.plotly_chart(fig_g, use_container_width=True)
         st.caption("출처: Kaggle · Berkeley Earth — GlobalTemperatures.csv (월평균 → 연평균)")
+# === Heatwave: 전국 폭염 일수 분포 ===
+st.markdown("---")
+st.subheader("③ 전국 폭염 일수 분포 (1991~2025, 기상청)")
+
+@st.cache_data(ttl=24*3600, show_spinner=True)
+def load_heatwave_data(path: str = "data/heatwave_days.csv") -> pd.DataFrame:
+    """
+    기상청 자료 (예: https://data.kma.go.kr/climate/heatWave/selectHeatWaveChart.do 에서 내려받은 CSV).
+    컬럼 예시: 연도, 서울, 부산, 대구, 인천, 광주, 대전, 울산, 세종, 강원, 충북, 충남, 전북, 전남, 경북, 경남, 제주
+    """
+    df = pd.read_csv(path)
+    # 기본 정리
+    if "연도" not in df.columns:
+        raise ValueError("CSV에 '연도' 컬럼이 필요합니다.")
+    return df
+
+try:
+    hw = load_heatwave_data()
+except Exception as e:
+    st.error("폭염 일수 데이터를 불러오지 못했습니다. CSV를 data/heatwave_days.csv 로 준비하세요.")
+    st.exception(e)
+    hw = pd.DataFrame()
+
+if not hw.empty:
+    # 연도 선택
+    year = st.slider("연도 선택", int(hw["연도"].min()), int(hw["연도"].max()), 2025, key="heatwave_year")
+    df_year = hw[hw["연도"] == year].melt(id_vars="연도", var_name="지역", value_name="폭염일수")
+
+    # 막대그래프
+    fig_hw = px.bar(
+        df_year, x="지역", y="폭염일수",
+        color="폭염일수", color_continuous_scale="Reds",
+        title=f"{year}년 전국 폭염 일수"
+    )
+    st.plotly_chart(fig_hw, use_container_width=True)
+
+    # 특정 지역 연도별 추이
+    region = st.selectbox("지역 선택 (추이 확인)", options=hw.columns[1:], key="heatwave_region")
+    fig_hw_line = px.line(hw, x="연도", y=region, markers=True,
+                          title=f"{region} 연도별 폭염 일수 추이")
+    st.plotly_chart(fig_hw_line, use_container_width=True)
+
+    st.caption("출처: 기상청 기후자료포털 — 폭염 일수 통계 (https://data.kma.go.kr/climate/heatWave)")
 
 st.markdown("---")
 st.caption("주의: 본 앱은 학생 설문(단면) 데이터와 글로벌 기온(연도별)을 병렬 비교합니다. 직접적 인과/상관을 의미하지 않으며, 시점·지역이 일치하는 패널 데이터가 필요합니다.")
