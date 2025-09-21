@@ -319,20 +319,6 @@ with left:
     else:
         df_sel = stu[selected_metrics].dropna()
         st.success(f"데이터 표본 수: **{len(df_sel)}명**")
-
-        # --- 수면시간 vs 불안 ---
-        st.markdown("### 💤 수면시간과 불안 점수")
-        if "sleep_hours" in stu.columns and "anxiety_score" in stu.columns:
-            d = stu[["sleep_hours", "anxiety_score"]].dropna()
-            if len(d) >= 3:
-                fig_sleep = px.scatter(
-                    d, x="sleep_hours", y="anxiety_score",
-                    color="anxiety_score",
-                    labels={"sleep_hours":"수면시간(시간)", "anxiety_score":"불안 점수"},
-                    title="수면시간이 늘수록 불안이 어떻게 변할까?"
-                )
-                st.plotly_chart(fig_sleep, use_container_width=True)
-
         # --- 연령대별 불안 ---
         st.markdown("### 👥 연령대별 불안 점수 비교")
         if "age" in stu.columns and "anxiety_score" in stu.columns:
