@@ -1,4 +1,5 @@
 import streamlit as st
+from datetime import date
 def display_report():
     """ '환경오염이 바꾸는 미래의 학교생활' 보고서를 마크다운으로 출력 """
     report_text = """
