@@ -67,7 +67,7 @@ def display_report():
 
 *참고 자료: 기상청 기상자료개방포털, 연합뉴스(2022-04-10), 한겨레, UNSW Newsroom 등 (원문에서 인용된 자료 목록)*
 """
-    st.markdown(report_text, unsafe_allow_html=True)
+st.markdown(report_text, unsafe_allow_html=True)
 
 
 # -----------------------------
