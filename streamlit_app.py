@@ -50,6 +50,9 @@ from scipy import stats
 # ----------------- 페이지/폰트 -----------------
 st.set_page_config(page_title="청소년 정서 × 기후 대시보드 (Kaggle)", layout="wide")
 
+def load_heatwave_data(path):
+    df = pd.read_csv(path, encoding="utf-8")
+    return df
 def inject_font_css():
     """ /fonts/Pretendard-Bold.ttf 존재 시 UI 전역에 적용 """
     font_path = "/fonts/Pretendard-Bold.ttf"
