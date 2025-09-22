@@ -1,5 +1,384 @@
+# streamlit_app.py
+# -*- coding: utf-8 -*-
+"""
+Streamlit + GitHub Codespaces 데이터 대시보드 (기후위기 정신건강/학업/미래 확장)
+
+구성:
+1) 공식 공개 데이터 대시보 (NASA POWER 일일 기온 API, 서울 좌표)
+2) 사용자 입력 대시보드 (프롬프트의 "폭염일수" 표 고정 내장)
+3) 기후위기 & 청소년 정신건강 (연구 참고) 탭
+4) 기후위기 & 청소년 학업 (연구 참고) 탭
+5) 기후위기, 우리의 미래 (대안 탐색) 탭 (★새로운 메뉴)
+
+폰트:
+- /fonts/Pretendard-Bold.ttf 존재 시 Streamlit/Plotly에 적용 시도(없으면 자동 생략)
+"""
+
+import io
+import json
+import math
+import textwrap
+from datetime import datetime, date
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import requests
 import streamlit as st
-from datetime import date
+from dateutil.relativedelta import relativedelta
+import plotly.express as px
+
+# -----------------------------
+# 기본 설정
+# -----------------------------
+st.set_page_config(page_title="기후위기 & 청소년 대응 대시보드", layout="wide")
+
+# Pretendard 적용 시도 (없으면 자동 생략)
+def inject_font_css():
+    font_path = Path("/fonts/Pretendard-Bold.ttf")
+    if font_path.exists():
+        st.markdown(
+            f"""
+            <style>
+            @font-face {{
+                font-family: 'Pretendard';
+                src: url('file://{font_path.as_posix()}') format('truetype');
+                font-weight: 700;
+                font-style: normal;
+            }}
+            html, body, [class*="css"], .stMarkdown, .stButton, .stSelectbox, .stSlider, .stText, .stMetric, .stDataFrame {{
+                font-family: 'Pretendard', 'Noto Sans KR', system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif !important;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+inject_font_css()
+
+PLOTLY_FONT = "Pretendard, Noto Sans KR, Arial, sans-serif"
+
+# 유틸
+KST_TODAY = datetime.now()
+TODAY_DATE = KST_TODAY.date()
+
+def to_date(s):
+    try:
+        return datetime.strptime(str(s), "%Y-%m-%d").date()
+    except Exception:
+        try:
+            return datetime.strptime(str(s), "%Y%m%d").date()
+        except Exception:
+            return pd.NaT
+
+def clamp_to_today(df, date_col="date"):
+    if df.empty:
+        return df
+    df = df.copy()
+    df[date_col] = pd.to_datetime(df[date_col]).dt.date
+    return df[df[date_col] <= TODAY_DATE]
+
+def clean_standardize(df, date_col="date", value_col="value", group_col=None):
+    df = df.copy()
+    # 결측/중복 처리
+    df = df.dropna(subset=[date_col])
+    if group_col:
+        df = df.drop_duplicates(subset=[date_col, group_col])
+    else:
+        df = df.drop_duplicates(subset=[date_col])
+    # 타입 통일
+    df[date_col] = pd.to_datetime(df[date_col]).dt.date
+    # value를 숫자형으로
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[value_col])
+    # 미래 데이터 제거
+    df = clamp_to_today(df, date_col)
+    return df
+
+def download_button_for_df(df, filename, label="CSV 다운로드"):
+    csv = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(label=label, data=csv, file_name=filename, mime="text/csv")
+
+def plot_line(df, title, yaxis_title):
+    if df.empty:
+        st.info("표시할 데이터가 없습니다.")
+        return
+    fig = px.line(
+        df,
+        x="date",
+        y="value",
+        color="group",
+        markers=True,
+        title=title,
+    )
+    fig.update_layout(
+        xaxis_title="날짜",
+        yaxis_title=yaxis_title,
+        legend_title="지표",
+        font=dict(family=PLOTLY_FONT),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+def plot_bar(df, title, yaxis_title, barmode="group"):
+    if df.empty:
+        st.info("표시할 데이터가 없습니다.")
+        return
+    fig = px.bar(
+        df,
+        x="date",
+        y="value",
+        color="group",
+        title=title,
+        barmode=barmode,
+    )
+    fig.update_layout(
+        xaxis_title="월",
+        yaxis_title=yaxis_title,
+        legend_title="지표",
+        font=dict(family=PLOTLY_FONT),
+        hovermode="x",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+# -----------------------------
+# 1) 공개 데이터 대시보드 함수
+# -----------------------------
+@st.cache_data(show_spinner=True, ttl=60 * 60)
+def fetch_nasa_power_daily(lat=37.5665, lon=126.9780, start="2015-01-01", end=None):
+    if end is None:
+        end = TODAY_DATE.strftime("%Y-%m-%d")
+    start_str = pd.to_datetime(start).strftime("%Y%m%d")
+    end_str = pd.to_datetime(end).strftime("%Y%m%d")
+    base_url = "https://power.larc.nasa.gov/api/temporal/daily/point"
+    params = {"parameters": "T2M,T2M_MAX", "community": "RE", "latitude": lat, "longitude": lon, "start": start_str, "end": end_str, "format": "JSON"}
+    try:
+        r = requests.get(base_url, params=params, timeout=30)
+        r.raise_for_status()
+        js = r.json()
+        t2m = js["properties"]["parameter"]["T2M"]
+        t2m_max = js["properties"]["parameter"]["T2M_MAX"]
+        records = []
+        for k, v in t2m.items():
+            d = to_date(k)
+            if pd.isna(d): continue
+            records.append({"date": d, "t2m": v, "t2m_max": t2m_max.get(k, np.nan)})
+        df = pd.DataFrame(records)
+        out = df.rename(columns={"t2m": "value"}).assign(group="일 평균기온(℃)")
+        out2 = df.rename(columns={"t2m_max": "value"}).assign(group="일 최고기온(℃)")
+        all_df = pd.concat([out[["date", "value", "group"]], out2[["date", "value", "group"]]], ignore_index=True)
+        all_df = clean_standardize(all_df, "date", "value", "group")
+        all_df["fallback"] = False
+        return all_df
+    except Exception:
+        dates = pd.date_range(end=TODAY_DATE, periods=60, freq="D")
+        np.random.seed(42)
+        base = 27 + np.sin(np.linspace(0, 3 * np.pi, len(dates))) * 5
+        avg = base + np.random.normal(0, 1.2, len(dates))
+        tmax = avg + np.random.uniform(3, 8, len(dates))
+        df = pd.DataFrame({"date": dates.date, "value": np.r_[avg, tmax], "group": ["일 평균기온(℃)"] * len(dates) + ["일 최고기온(℃)"] * len(dates)})
+        df = clean_standardize(df, "date", "value", "group")
+        df["fallback"] = True
+        return df
+
+def make_heatwave_flags(df, threshold_max=33.0):
+    if df.empty: return df
+    w = df.copy().pivot_table(index="date", columns="group", values="value")
+    w["폭염일"] = (w.get("일 최고기온(℃)", pd.Series(index=w.index)) >= threshold_max).astype(int)
+    out = (w.reset_index()[["date", "폭염일"]].rename(columns={"폭염일": "value"}).assign(group=f"폭염일(최고기온≥{threshold_max}℃)"))
+    return clean_standardize(out, "date", "value", "group")
+
+def monthly_summary(df):
+    if df.empty: return df
+    x = df.copy()
+    x["year"] = pd.to_datetime(x["date"]).dt.year
+    x["month"] = pd.to_datetime(x["date"]).dt.month
+    def agg_fn(g):
+        return pd.Series({"value": g["value"].sum()}) if g.name[2].startswith("폭염일") else pd.Series({"value": g["value"].mean()})
+    m = (x.groupby(["year", "month", "group"], as_index=False).apply(agg_fn).reset_index(drop=True))
+    m["date"] = pd.to_datetime(dict(year=m["year"], month=m["month"], day=1)).dt.date
+    return m[["date", "value", "group", "year", "month"]]
+
+def add_risk_annotation():
+    st.markdown("""
+        > 참고: **연구에 따르면, 하루 평균기온이 1°C 높아질 때마다 청소년(12~24세) 자살 충동/행동으로 인한 응급실 방문이 약 1.3% 증가**하는 경향이 관찰되었습니다.  
+        > (호주 뉴사우스웨일스州, 2012–2019 시계열 분석. 인과 단정 불가, 참고 지표로만 활용)
+        """)
+    with st.expander("연구 출처(주석) 보기", expanded=False):
+        st.code(textwrap.dedent("""
+            PubMed (청소년 자살충동 1°C당 1.3% 증가):
+            https://pubmed.ncbi.nlm.nih.gov/39441101/
+            """), language="text")
+
+# -----------------------------
+# 2) 사용자 입력 대시보드 함수
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def load_user_table():
+    raw = """연도,1월,2월,3월,4월,5월,6월,7월,8월,9월,10월,11월,12월,연합계,순위
+2015,0,0,0,0,0,1,4,3,0,0,0,0,8,10
+2016,0,0,0,0,0,0,4,20,0,0,0,0,24,4
+2017,0,0,0,0,0,1,5,7,0,0,0,0,13,8
+2018,0,0,0,0,0,0,16,19,0,0,0,0,35,1
+2019,0,0,0,0,1,0,4,10,0,0,0,0,15,7
+2020,0,0,0,0,0,2,0,2,0,0,0,0,4,11
+2021,0,0,0,0,0,0,15,3,0,0,0,0,18,6
+2022,0,0,0,0,0,0,10,0,0,0,0,0,10,9
+2023,0,0,0,0,0,2,6,11,0,0,0,0,19,5
+2024,0,0,0,0,0,4,2,21,6,0,0,0,33,2
+2025,0,0,0,0,0,3,15,9,1,,,,28,3
+평균,0.0,0.0,0.0,0.0,0.1,1.2,7.4,9.6,0.6,0.0,0.0,0.0,,  
+"""
+    df = pd.read_csv(io.StringIO(raw))
+    df = df[df["연도"].apply(lambda x: str(x).isdigit())].copy()
+    df["연도"] = df["연도"].astype(int)
+    month_cols = ["1월","2월","3월","4월","5월","6월","7월","8월","9월","10월","11월","12월"]
+    keep_cols = ["연도","연합계","순위"]
+    for c in month_cols:
+        if c not in df.columns: df[c] = np.nan
+    m = df.melt(id_vars=keep_cols + ["연도"], value_vars=month_cols, var_name="월", value_name="폭염일수")
+    m["월_int"] = m["월"].str.replace("월", "", regex=False).astype(int)
+    m["date"] = pd.to_datetime(dict(year=m["연도"], month=m["월_int"], day=1)).dt.date
+    m["value"] = pd.to_numeric(m["폭염일수"], errors="coerce")
+    out = m[["date", "value", "연도"]].rename(columns={"연도": "group"})
+    out = clean_standardize(out, "date", "value", "group")
+    out = clamp_to_today(out, "date")
+    yr = df[["연도", "연합계", "순위"]].rename(columns={"연도":"year","연합계":"total","순위":"rank"})
+    yr["total"] = pd.to_numeric(yr["total"], errors="coerce")
+    yr["rank"] = pd.to_numeric(yr["rank"], errors="coerce")
+    return out, yr
+
+def plot_user_monthly(df_long):
+    if df_long.empty: st.info("표시할 데이터가 없습니다."); return
+    fig = px.line(df_long, x="date", y="value", color="group", markers=True, title="연도별 월간 폭염일수 추이")
+    fig.update_layout(xaxis_title="월", yaxis_title="폭염일수(일)", legend_title="연도", font=dict(family=PLOTLY_FONT), hovermode="x unified")
+    st.plotly_chart(fig, use_container_width=True)
+
+def plot_user_rank(yr):
+    y2 = yr.dropna(subset=["year","total","rank"]).copy()
+    if y2.empty: st.info("순위 데이터가 없습니다."); return
+    y2["date"] = pd.to_datetime(dict(year=y2["year"], month=1, day=1)).dt.date
+    fig = px.scatter(y2, x="year", y="rank", size="total", text="total", title="연도별 폭염일수 연합계 & 순위")
+    fig.update_traces(textposition="top center")
+    fig.update_layout(xaxis_title="연도", yaxis_title="순위(낮을수록 상위)", yaxis=dict(autorange="reversed"), font=dict(family=PLOTLY_FONT))
+    st.plotly_chart(fig, use_container_width=True)
+
+# -----------------------------
+# 3) 기후위기 & 청소년 정신건강 대시보드 함수
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def get_mental_health_indicators():
+    research_indicators = pd.DataFrame([
+        {"지표": "폭염 vs 우울증 위험 증가", "단위": "%", "값": 13, "출처": "연구(중국 청소년)", "설명": "폭염 강도 1단위 증가당"},
+        {"지표": "폭염 vs 불안 위험 증가", "단위": "%", "값": 12, "출처": "연구(중국 청소년)", "설명": "폭염 강도 1단위 증가당"},
+        {"지표": "기온 1°C↑ vs 우울 증상 위험 증가", "단위": "%", "값": 14, "출처": "연구(한국 성인 19-40세)", "설명": "1961-1990 대비 연평균 기온 1°C 증가당"},
+    ])
+    kyrbs_data = pd.DataFrame({"연도": [2021, 2022, 2023, 2024, 2025], "우울감 경험률(%)": [25.0, 26.5, 27.2, 28.5, 29.1], "자살 생각률(%)": [10.5, 11.0, 11.3, 11.5, 11.8]})
+    kyrbs_data["date"] = pd.to_datetime(dict(year=kyrbs_data["연도"], month=1, day=1)).dt.date
+    kyrbs_data = clamp_to_today(kyrbs_data, "date")
+    melted_kyrbs = kyrbs_data.melt(id_vars=["연도", "date"], value_vars=["우울감 경험률(%)", "자살 생각률(%)"], var_name="group", value_name="value_perc").rename(columns={"value": "value_perc"})
+    return research_indicators, melted_kyrbs
+
+def plot_kyrbs_trend(df):
+    if df.empty: st.info("청소년 정신건강 현황 데이터가 없습니다."); return
+    fig = px.line(df, x="연도", y="value_perc", color="group", markers=True, title="청소년 정신건강 주요 지표 추이 (가상 데이터, KYRBS 등 참고)")
+    fig.update_layout(xaxis_title="연도", yaxis_title="비율(%)", legend_title="지표", font=dict(family=PLOTLY_FONT), hovermode="x unified")
+    st.plotly_chart(fig, use_container_width=True)
+
+# -----------------------------
+# 4) 기후위기 & 청소년 학업 대시보드 함수
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def get_academic_indicators():
+    academic_indicators = pd.DataFrame([
+        {"지표": "기온 1°C↑ vs 학업 성취도 하락", "단위": "%", "값": 1, "출처": "연구(미국, 에어컨X 교실)", "설명": "외부 온도가 $1^\circ \text{C}$ 상승 시"},
+    ])
+    start_year = 2018
+    end_year = TODAY_DATE.year
+    academic_data = pd.DataFrame({"연도": range(start_year, end_year + 1)})
+    np.random.seed(45)
+    loss_increase = np.linspace(0, 15, len(academic_data))
+    noise = np.random.normal(0, 3, len(academic_data))
+    academic_data["고온 학습 손실 지수(가상)"] = (10 + loss_increase + noise).clip(0, 30).round(1)
+    np.random.seed(46)
+    base_change = np.linspace(1.0, -1.0, len(academic_data))
+    change_noise = np.random.normal(0, 0.5, len(academic_data))
+    academic_data["학업 성취도 변화율(%p, 가상)"] = (base_change + change_noise).round(2)
+    academic_data["date"] = pd.to_datetime(dict(year=academic_data["연도"], month=1, day=1)).dt.date
+    academic_data = clamp_to_today(academic_data, "date")
+    melted_academic = academic_data.melt(id_vars=["연도", "date"], value_vars=["고온 학습 손실 지수(가상)", "학업 성취도 변화율(%p, 가상)"], var_name="group", value_name="value")
+    return academic_indicators, melted_academic
+
+def plot_academic_trend(df):
+    if df.empty: st.info("학업 관련 지표 데이터가 없습니다."); return
+    loss_df = df[df["group"] == "고온 학습 손실 지수(가상)"]
+    change_df = df[df["group"] == "학업 성취도 변화율(%p, 가상)"]
+    fig1 = px.bar(loss_df, x="연도", y="value", title="고온 학습 손실 지수 추이 (가상 지표)", color_discrete_sequence=['#ff7f0e'])
+    fig1.update_layout(xaxis_title="연도", yaxis_title="학습 손실 지수 (0-100)", font=dict(family=PLOTLY_FONT))
+    st.plotly_chart(fig1, use_container_width=True)
+    fig2 = px.line(change_df, x="연도", y="value", markers=True, title="학업 성취도 변화율 추이 (전년 대비 %p, 가상 지표)", color_discrete_sequence=['#1f77b4'])
+    fig2.update_traces(name="학업 성취도 변화율", showlegend=True)
+    fig2.update_layout(xaxis_title="연도", yaxis_title="변화율 (%p)", font=dict(family=PLOTLY_FONT), shapes=[dict(type='line', xref='paper', yref='y', x0=0, x1=1, y0=0, y1=0, line=dict(color='Red', width=1, dash='dash'))])
+    st.plotly_chart(fig2, use_container_width=True)
+
+# -----------------------------
+# 5) 기후위기, 우리의 미래 대시보드 함수 (신규 추가)
+# -----------------------------
+def display_future_solutions():
+    """ 기후위기 해결 방안 (학생/학교 차원)을 텍스트로 구성 및 표시 """
+    st.markdown("### 🧑‍🤝‍🧑 학생 차원의 실천 방안")
+    st.info("청소년들은 작은 습관 변화로도 큰 영향을 줄 수 있습니다. 아래 행동들은 당장 실천할 수 있는 '기후 행동'의 시작입니다.")
+
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("#### 🔋 에너지 절약 및 친환경 소비")
+        st.markdown(
+            """
+            * **플러그 뽑기 (대기전력 줄이기):** 사용하지 않는 가전제품의 플러그를 뽑아 불필요한 전력 소모를 막습니다.
+            * **LED 조명 사용 및 소등:** 교실이나 집에서 나갈 때 반드시 불을 끕니다.
+            * **개인 컵/텀블러 사용:** 일회용 컵 사용을 최소화하여 쓰레기와 제조 과정의 탄소를 줄입니다.
+            * **로컬 푸드 및 채소 중심 식단:** 먼 거리에서 운송된 식품(푸드 마일리지) 대신 지역 농산물을 선호하고, 육류 소비를 줄여 축산업에서 발생하는 메탄가스 배출을 감소시킵니다.
+            """
+        )
+    with colB:
+        st.markdown("#### 🌳 자원 재활용 및 환경 운동")
+        st.markdown(
+            """
+            * **올바른 분리수거 습관:** 비우고, 헹구고, 분리하고, 섞지 않는 '4대 원칙'을 철저히 지킵니다.
+            * **물품 재사용 및 공유:** 헌 옷, 책, 학용품 등을 버리지 않고 재사용하거나 나눕니다.
+            * **대중교통 및 자전거 이용:** 가까운 거리는 걷거나 자전거를 타고, 장거리는 대중교통을 이용해 자동차 배기가스 배출을 줄입니다.
+            * **기후 관련 학습 및 참여:** 기후변화 관련 정보를 꾸준히 학습하고, 학교 환경 동아리나 지역 환경 운동에 적극적으로 참여합니다.
+            """
+        )
+
+    st.markdown("---")
+    st.markdown("### 🏫 학교/제도 차원의 대안")
+    st.warning("학교와 교육 당국의 제도 개선은 학생들의 기후 위기 적응력과 대응 능력을 높이는 핵심적인 방안입니다.")
+    
+    colC, colD = st.columns(2)
+    with colC:
+        st.markdown("#### 💡 교육 및 인식 개선")
+        st.markdown(
+            """
+            * **기후 위기 적응 교육 강화:** 폭염, 폭우 등 기후 재난 상황에 대한 **안전 교육 및 심리적 회복탄력성 교육**을 정규 교과 과정에 포함해야 합니다.
+            * **친환경 교과목 확대:** 기후 변화, 에너지 전환, 지속 가능한 개발 목표(SDGs)를 다루는 심화 과목을 개설하고 동아리 활동을 지원해야 합니다.
+            * **환경 교육 의무화:** 초·중·고 교육 전반에 걸쳐 기후·환경 교육 시간을 의무화하고 전문 교사를 배치해야 합니다.
+            """
+        )
+    with colD:
+        st.markdown("#### 🌿 학교 환경 개선 및 제도 마련")
+        st.markdown(
+            """
+            * **학교 건물의 그린 리모델링:** 고효율 단열재, 고성능 창호 등을 적용하여 냉난방 에너지 효율을 높이고 탄소 배출을 줄여야 합니다.
+            * **쿨링 스페이스(Cooling Space) 확보:** 폭염 시 학생들이 안전하게 휴식하고 학습할 수 있도록 냉방 시설이 잘 갖춰진 공간을 확충해야 합니다.
+            * **친환경 급식 시스템 도입:** 식자재 운송 거리를 최소화하고, 채식 선택지를 확대하는 등 탄소 발자국을 줄이는 급식 체계를 구축해야 합니다.
+            * **탄소 중립 학교 선언:** 학교 운영 전반에서 탄소 배출량을 제로화하기 위한 목표를 설정하고, 태양광 발전 시설 등을 도입해야 합니다.
+            """
+        )
+
+# -----------------------------
+# 6) 보고서 출력 함수 (링크 업데이트)
+# -----------------------------
 def display_report():
     """ '환경오염이 바꾸는 미래의 학교생활' 보고서를 마크다운으로 출력 """
     report_text = """
@@ -281,3 +660,12 @@ with tab5: # ★새로 추가된 '기후위기, 우리의 미래' 탭
     st.markdown("---")
     st.info("기후위기 대응은 모두의 책임이며, 청소년들의 작은 실천과 학교의 제도적 지원이 더 나은 미래를 만드는 핵심 동력입니다.")
 
+
+# -----------------------------
+# 보고서 및 푸터 (항상 유지)
+# -----------------------------
+st.markdown("---")
+st.markdown("<br>", unsafe_allow_html=True)
+display_report()
+st.markdown("---")
+st.caption("© Streamlit 대시보드 예시. 데이터는 공개 API/제공 표/연구 인용 기준으로 구성되며, 오늘(로컬 자정) 이후 데이터는 제거됩니다.")
